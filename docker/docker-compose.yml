@@ -1,0 +1,58 @@
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL ─────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: musicgen_db
+    environment:
+      POSTGRES_DB: music_gen
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Flask Backend ──────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: musicgen_backend
+    environment:
+      DATABASE_URL: postgresql://postgres:password@db:5432/music_gen
+      SEQUENCES_DIR: /app/sequences
+    volumes:
+      - sequences_data:/app/sequences
+      - ./backend:/app
+    ports:
+      - "5000:5000"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: python app.py
+
+  # ── React Frontend ─────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: musicgen_frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    environment:
+      REACT_APP_API_URL: http://localhost:5000/api
+
+volumes:
+  pgdata:
+  sequences_data:
