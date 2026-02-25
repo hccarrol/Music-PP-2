@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.env
+
+# Sequences (MIDI files — large, don't commit)
+backend/sequences/
+sequences/
+*.mid
+
+# Node
+node_modules/
+frontend/build/
+
+# DB
+*.sqlite3
