@@ -24,14 +24,14 @@ from generators.midi_generator import MidiSequenceGenerator, SequenceConfig, gen
 # ─────────────────────────────────────────────
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=["http://localhost:3000"])
 
 SEQUENCES_DIR = os.environ.get("SEQUENCES_DIR", "./sequences")
 os.makedirs(SEQUENCES_DIR, exist_ok=True)
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
-    "postgresql://postgres:password@localhost:5432/music_gen"
+    "postgresql://postgres:Pep152549@localhost:5432/music_gen"
 )
 
 
@@ -141,8 +141,10 @@ def batch_generate():
             config = SequenceConfig.random()
             gen = MidiSequenceGenerator(config)
             pm, metadata = gen.generate()
-            filepath = os.path.join(SEQUENCES_DIR, metadata["filename"])
+            filename = f"{metadata['id']}.mid"
+            filepath = os.path.join(SEQUENCES_DIR, filename)
             pm.write(filepath)
+            metadata["filename"] = filename
             metadata["file_path"] = filepath
             insert_sequence(conn, pm, metadata)
             inserted += 1
