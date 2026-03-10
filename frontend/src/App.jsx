@@ -37,12 +37,12 @@ function StarRating({ value, onChange, disabled }) {
 // ─── MIDI Player using Tone.js ────────────────────────────────────────────────
 
 function useMidiPlayer() {
-  const toneRef = useRef(null);
+  const synthRef = useRef(null);
   const partRef = useRef(null);
-  const [status, setStatus] = useState("idle"); // idle | loading | playing | paused | done
+  const [status, setStatus] = useState("idle");
 
-  const loadAndPlay = useCallback(async (seqId, onTimeUpdate) => {
-    // Dynamically load Tone.js from CDN
+  const loadAndPlay = useCallback(async (seqId) => {
+    // Load Tone.js if not already loaded
     if (!window.Tone) {
       await new Promise((resolve, reject) => {
         const s = document.createElement("script");
@@ -53,142 +53,108 @@ function useMidiPlayer() {
       });
     }
 
-    // Fetch MIDI binary
+    // Load @tonejs/midi
+    const { Midi } = await import("@tonejs/midi");
+
     setStatus("loading");
-    const res = await fetch(`${API}/sequences/${seqId}/midi`);
-    const buf = await res.arrayBuffer();
 
-    // Parse MIDI manually (lightweight parser)
-    const notes = parseMidi(buf);
-    if (!notes.length) { setStatus("idle"); return; }
+    try {
+      // Fetch the MIDI file
+      const res = await fetch(`${API}/sequences/${seqId}/midi`);
+      const arrayBuffer = await res.arrayBuffer();
 
-    await window.Tone.start();
-    if (partRef.current) { partRef.current.dispose(); }
+      // Parse with @tonejs/midi (much more reliable than custom parser)
+      const midi = new Midi(arrayBuffer);
 
-    const synth = new window.Tone.PolySynth(window.Tone.Synth, {
-      oscillator: { type: "triangle" },
-      envelope: { attack: 0.02, decay: 0.1, sustain: 0.5, release: 0.8 },
-    }).toDestination();
-    toneRef.current = synth;
+      await window.Tone.start();
 
-    const events = notes.map((n) => ({
-      time: n.start,
-      note: window.Tone.Frequency(n.pitch, "midi").toNote(),
-      duration: Math.max(0.05, n.end - n.start),
-      velocity: n.velocity / 127,
-    }));
+      // Clean up previous playback
+      if (partRef.current) {
+        partRef.current.dispose();
+      }
+      if (synthRef.current) {
+        synthRef.current.dispose();
+      }
 
-    const part = new window.Tone.Part((time, ev) => {
-      synth.triggerAttackRelease(ev.note, ev.duration, time, ev.velocity);
-    }, events);
+      window.Tone.Transport.cancel();
+      window.Tone.Transport.stop();
 
-    part.start(0);
-    partRef.current = part;
+      // Create synth
+      const synth = new window.Tone.PolySynth(window.Tone.Synth, {
+        oscillator: { type: "triangle" },
+        envelope: { attack: 0.02, decay: 0.1, sustain: 0.5, release: 0.8 },
+        volume: -6,
+      }).toDestination();
+      synthRef.current = synth;
 
-    window.Tone.Transport.cancel();
-    window.Tone.Transport.start();
-    setStatus("playing");
+      // Build note events from all tracks
+      const notes = [];
+      midi.tracks.forEach((track) => {
+        track.notes.forEach((note) => {
+          notes.push({
+            time: note.time,
+            note: note.name,
+            duration: Math.max(0.05, note.duration),
+            velocity: note.velocity,
+          });
+        });
+      });
 
-    const lastTime = Math.max(...notes.map((n) => n.end));
-    window.Tone.Transport.scheduleOnce(() => {
-      setStatus("done");
-    }, lastTime + 0.5);
+      if (notes.length === 0) {
+        console.warn("No notes found in MIDI file");
+        setStatus("idle");
+        return;
+      }
+
+      console.log(`Playing ${notes.length} notes`);
+
+      // Schedule all notes
+      const part = new window.Tone.Part((time, ev) => {
+        synth.triggerAttackRelease(
+          ev.note,
+          ev.duration,
+          time,
+          ev.velocity
+        );
+      }, notes);
+
+      part.start(0);
+      partRef.current = part;
+
+      // Start transport
+      window.Tone.Transport.start();
+      setStatus("playing");
+
+      // Schedule end
+      const lastNote = Math.max(...notes.map((n) => n.time + n.duration));
+      window.Tone.Transport.scheduleOnce(() => {
+        setStatus("done");
+      }, lastNote + 0.5);
+
+    } catch (err) {
+      console.error("MIDI playback error:", err);
+      setStatus("idle");
+    }
   }, []);
 
   const stop = useCallback(() => {
-    if (window.Tone) window.Tone.Transport.stop();
-    if (partRef.current) partRef.current.stop();
+    if (window.Tone) {
+      window.Tone.Transport.stop();
+      window.Tone.Transport.cancel();
+    }
+    if (partRef.current) {
+      partRef.current.stop();
+      partRef.current.dispose();
+      partRef.current = null;
+    }
+    if (synthRef.current) {
+      synthRef.current.dispose();
+      synthRef.current = null;
+    }
     setStatus("idle");
   }, []);
 
   return { loadAndPlay, stop, status };
-}
-
-
-// Minimal MIDI parser (handles Type 0 and Type 1)
-function parseMidi(buffer) {
-  const view = new DataView(buffer);
-  const bytes = new Uint8Array(buffer);
-
-  let pos = 0;
-  function readUint32() { const v = view.getUint32(pos); pos += 4; return v; }
-  function readUint16() { const v = view.getUint16(pos); pos += 2; return v; }
-  function readUint8() { return bytes[pos++]; }
-  function readVarLen() {
-    let val = 0;
-    let b;
-    do { b = readUint8(); val = (val << 7) | (b & 0x7f); } while (b & 0x80);
-    return val;
-  }
-
-  const magic = readUint32();
-  if (magic !== 0x4d546864) return []; // Not MIDI
-
-  const headerLen = readUint32();
-  const format = readUint16();
-  const numTracks = readUint16();
-  const ticksPerBeat = readUint16();
-
-  const notes = [];
-  let tempo = 500000; // default 120 BPM
-
-  for (let t = 0; t < numTracks; t++) {
-    const trackMagic = readUint32();
-    const trackLen = readUint32();
-    const trackEnd = pos + trackLen;
-
-    let tick = 0;
-    let lastStatus = 0;
-    const activeNotes = {};
-
-    while (pos < trackEnd) {
-      const delta = readVarLen();
-      tick += delta;
-
-      let statusByte = bytes[pos];
-      if (statusByte & 0x80) { lastStatus = statusByte; pos++; }
-      else { statusByte = lastStatus; }
-
-      const type = statusByte >> 4;
-      const ch = statusByte & 0x0f;
-
-      if (statusByte === 0xff) {
-        const metaType = readUint8();
-        const metaLen = readVarLen();
-        if (metaType === 0x51 && metaLen === 3) {
-          tempo = (bytes[pos] << 16) | (bytes[pos + 1] << 8) | bytes[pos + 2];
-        }
-        pos += metaLen;
-      } else if (type === 9) {
-        const pitch = readUint8();
-        const vel = readUint8();
-        const timeSec = (tick / ticksPerBeat) * (tempo / 1e6);
-        if (vel > 0) {
-          activeNotes[pitch] = { pitch, start: timeSec, velocity: vel };
-        } else if (activeNotes[pitch]) {
-          const n = activeNotes[pitch];
-          notes.push({ ...n, end: timeSec });
-          delete activeNotes[pitch];
-        }
-      } else if (type === 8) {
-        const pitch = readUint8(); readUint8();
-        const timeSec = (tick / ticksPerBeat) * (tempo / 1e6);
-        if (activeNotes[pitch]) {
-          notes.push({ ...activeNotes[pitch], end: timeSec });
-          delete activeNotes[pitch];
-        }
-      } else if (type === 0xa || type === 0xb || type === 0xe) {
-        readUint8(); readUint8();
-      } else if (type === 0xc || type === 0xd) {
-        readUint8();
-      } else {
-        break;
-      }
-    }
-    pos = trackEnd;
-  }
-
-  return notes.sort((a, b) => a.start - b.start);
 }
 
 
