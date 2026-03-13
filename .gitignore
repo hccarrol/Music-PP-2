@@ -16,3 +16,5 @@ frontend/build/
 # DB
 *.sqlite3
 .env.docker
+backend/sequences/
+database/backup_*.sql
