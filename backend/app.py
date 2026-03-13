@@ -157,49 +157,64 @@ def batch_generate():
 
 @app.route("/api/sequences", methods=["GET"])
 def list_sequences():
-    """List sequences, with optional filters. Returns unrated ones first by default."""
     page = int(request.args.get("page", 1))
     per_page = min(int(request.args.get("per_page", 20)), 100)
     unrated_first = request.args.get("unrated_first", "true").lower() == "true"
-    scale = request.args.get("scale")
-    key = request.args.get("key")
 
     offset = (page - 1) * per_page
-    filters = []
-    params = []
-
-    if scale:
-        filters.append("s.scale = %s")
-        params.append(scale)
-    if key:
-        filters.append("s.key_signature = %s")
-        params.append(key)
-
-    where_clause = ("WHERE " + " AND ".join(filters)) if filters else ""
-
-    order = "s.rating_count ASC, s.created_at DESC" if unrated_first else "s.created_at DESC"
-
-    params += [per_page, offset]
 
     try:
         conn = get_db()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(f"""
-                SELECT s.*, COUNT(r.id)::int as rating_count, ROUND(AVG(r.rating), 2) as avg_rating
-                FROM sequences s
-                LEFT JOIN ratings r ON r.sequence_id = s.id
-                {where_clause}
-                GROUP BY s.id
-                ORDER BY {order}
-                LIMIT %s OFFSET %s
-            """, params)
+
+            if unrated_first:
+                # Only return sequences that have zero ratings
+                cur.execute("""
+                    SELECT s.*,
+                        COUNT(r.id)::int as rating_count,
+                        ROUND(AVG(r.rating), 2) as avg_rating
+                    FROM sequences s
+                    LEFT JOIN ratings r ON r.sequence_id = s.id
+                    GROUP BY s.id
+                    HAVING COUNT(r.id) = 0
+                    ORDER BY s.created_at DESC
+                    LIMIT %s OFFSET %s
+                """, (per_page, offset))
+            else:
+                # Return all sequences, newest first
+                cur.execute("""
+                    SELECT s.*,
+                        COUNT(r.id)::int as rating_count,
+                        ROUND(AVG(r.rating), 2) as avg_rating
+                    FROM sequences s
+                    LEFT JOIN ratings r ON r.sequence_id = s.id
+                    GROUP BY s.id
+                    ORDER BY s.created_at DESC
+                    LIMIT %s OFFSET %s
+                """, (per_page, offset))
+
             rows = [dict(r) for r in cur.fetchall()]
 
-            cur.execute("SELECT COUNT(*) FROM sequences")
+            # Get correct total count for pagination
+            if unrated_first:
+                cur.execute("""
+                    SELECT COUNT(*) FROM sequences s
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM ratings r WHERE r.sequence_id = s.id
+                    )
+                """)
+            else:
+                cur.execute("SELECT COUNT(*) FROM sequences")
+
             total = cur.fetchone()["count"]
 
         conn.close()
-        return jsonify({"sequences": rows, "total": total, "page": page, "per_page": per_page})
+        return jsonify({
+            "sequences": rows,
+            "total": total,
+            "page": page,
+            "per_page": per_page
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
